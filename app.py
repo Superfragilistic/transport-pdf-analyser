@@ -1,252 +1,325 @@
-import io
-import os
-import datetime
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import streamlit as st
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+from pathlib import Path
 
-# --- Streamlit Page Configuration ---
+import pandas as pd
+import streamlit as st
+
+
 st.set_page_config(
-    page_title="Transport Data Analyzer",
-    page_icon="📊",
-    layout="centered"
+    page_title="Transport for Clients Assessment",
+    page_icon="🚐",
+    layout="wide",
 )
 
-# --- Custom CSS Styling ---
-st.markdown("""
-    <style>
-    .main-title {
-        font-size: 32px;
-        font-weight: bold;
-        color: #1A365D;
-        text-align: center;
-        margin-bottom: 5px;
-    }
-    .subtitle {
-        font-size: 16px;
-        color: #4A5568;
-        text-align: center;
-        margin-bottom: 30px;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
-st.markdown('<div class="main-title">Transport Data Analyzer Dashboard</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Upload your Excel template to compile a comprehensive PDF Analysis Report instantly.</div>', unsafe_allow_html=True)
+DEFAULT_WORKBOOK = "Transport_for_Clients (1).xlsx"
 
-# --- Core Data Processing & PDF Generator Function ---
-def process_and_generate_pdf(file_contents, output_pdf_name='Transport_Analysis_Summary.pdf'):
-    # 1. Load data from the uploaded file bytes
-    excel_file = io.BytesIO(file_contents)
-    df_sheet1 = pd.read_excel(excel_file, sheet_name=0)
-    df_sheet2 = pd.read_excel(excel_file, sheet_name=1)
 
-    # 2. Rename columns
-    df_sheet1.rename(columns={df_sheet1.columns[0]: 'Provider'}, inplace=True)
-    df_sheet2.rename(columns={df_sheet2.columns[0]: 'Provider'}, inplace=True)
+PROVIDER_NAME_CORRECTIONS = {
+    "SLEC Transpor Office (July - Aug 2026 Pilot)":
+        "SLEC Transport Office (July - Aug 2026 Pilot)",
+}
 
-    # 3. Format Date Columns to 'MMM YYYY'
-    def format_columns(df):
-        new_columns = {}
-        for col in df.columns:
-            if isinstance(col, (datetime.datetime, pd.Timestamp)):
-                new_columns[col] = col.strftime('%b %Y')
-            elif isinstance(col, str):
-                try:
-                    parsed_date = pd.to_datetime(col)
-                    new_columns[col] = parsed_date.strftime('%b %Y')
-                except (ValueError, TypeError):
-                    pass
-        return df.rename(columns=new_columns)
 
-    df_sheet1 = format_columns(df_sheet1)
-    df_sheet2 = format_columns(df_sheet2)
+def clean_provider_name(provider):
+    """Return a consistent provider name for matching across worksheets."""
+    provider = str(provider).strip()
+    return PROVIDER_NAME_CORRECTIONS.get(provider, provider)
 
-    # 4. Drop Unnamed/Helper Columns
-    cols_to_drop = [col for col in df_sheet1.columns if 'Unnamed' in str(col)]
-    df_sheet1.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-    df_sheet2.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
-    # Ensure Provider names are clean strings and filter out numeric or empty rows
-    df_sheet1['Provider'] = df_sheet1['Provider'].fillna("").astype(str).str.strip()
-    df_sheet2['Provider'] = df_sheet2['Provider'].fillna("").astype(str).str.strip()
+def read_measure_sheet(file_source, sheet_name, value_name):
+    """Convert one wide worksheet into provider-month rows."""
+    wide_data = pd.read_excel(file_source, sheet_name=sheet_name, header=None)
 
-    # Filter out empty, total, spacer or numeric dummy rows
-    invalid_names = ['', '0', '0.0', 'nan', 'nan.0', 'Total', 'Totals', 'total', 'totals']
-    df_sheet1 = df_sheet1[~df_sheet1['Provider'].isin(invalid_names)].reset_index(drop=True)
-    df_sheet2 = df_sheet2[~df_sheet2['Provider'].isin(invalid_names)].reset_index(drop=True)
+    month_values = pd.to_datetime(wide_data.iloc[0, 1:], errors="coerce")
+    valid_columns = [
+        column_number + 1
+        for column_number, month in enumerate(month_values)
+        if pd.notna(month)
+    ]
 
-    # Fill NaNs with zeros in data columns
-    df_sheet1.fillna(0, inplace=True)
-    df_sheet2.fillna(0, inplace=True)
+    if not valid_columns:
+        raise ValueError(f"No month columns were found in the '{sheet_name}' sheet.")
 
-    # Drop specific structural empty/totals spacer rows if they exist at index 6 and 7
-    df_sheet1_cleaned = df_sheet1.drop(index=[6, 7], errors='ignore').reset_index(drop=True)
-    df_sheet2_cleaned = df_sheet2.drop(index=[6, 7], errors='ignore').reset_index(drop=True)
+    selected_data = wide_data.iloc[1:, [0] + valid_columns].copy()
+    selected_data.columns = [
+        "Provider",
+        *[pd.Timestamp(wide_data.iloc[0, column]) for column in valid_columns],
+    ]
 
-    # 7. Perform Calculations
-    month_cols = [col for col in df_sheet1_cleaned.columns if col != 'Provider']
-
-    df_trips_summary = pd.DataFrame({
-        'Provider': df_sheet1_cleaned['Provider'],
-        'Total Trips': df_sheet1_cleaned[month_cols].sum(axis=1)
-    })
-    df_trips_summary['Ave_trips'] = df_trips_summary['Total Trips'] / 12
-
-    df_cost_summary = pd.DataFrame({
-        'Provider': df_sheet2_cleaned['Provider'],
-        'Total Cost': df_sheet2_cleaned[month_cols].sum(axis=1)
-    })
-    df_cost_summary['Ave_cost_per_month'] = df_cost_summary['Total Cost'] / 12
-
-    df_summary_merged = pd.merge(df_trips_summary, df_cost_summary, on='Provider')
-    df_summary_merged['Ave_cost_per_trip'] = df_summary_merged['Total Cost'] / df_summary_merged['Total Trips']
-    df_summary_merged.fillna(0, inplace=True)
-
-    # 8. Plot and Save Line Chart
-    df_trips_long_clean = df_sheet1_cleaned.melt(
-        id_vars=['Provider'],
-        var_name='Month', 
-        value_name='Trips'
+    selected_data = selected_data.dropna(subset=["Provider"])
+    selected_data["Provider"] = selected_data["Provider"].apply(
+        clean_provider_name
     )
 
-    plt.figure(figsize=(10, 5))
-    sns.set_theme(style="whitegrid")
-    sns.lineplot(
-        data=df_trips_long_clean,
-        x='Month',
-        y='Trips',
-        hue='Provider',
-        marker='o',
-        linewidth=2
+    long_data = selected_data.melt(
+        id_vars="Provider",
+        var_name="Month",
+        value_name=value_name,
     )
-    plt.title('Comparison of Monthly Trip Trends by Provider', fontsize=12, fontweight='bold')
-    plt.xlabel('Month', fontsize=10)
-    plt.ylabel('Number of Trips', fontsize=10)
-    plt.xticks(rotation=45, ha='right', fontsize=8)
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.legend(title='Providers', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8)
-    plt.tight_layout()
 
-    chart_path = 'temp_line_chart.png'
-    plt.savefig(chart_path, dpi=300)
-    plt.close()
+    long_data["Month"] = pd.to_datetime(long_data["Month"])
+    long_data[value_name] = pd.to_numeric(
+        long_data[value_name], errors="coerce"
+    ).fillna(0)
 
-    # 9. Build ReportLab PDF
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
-    story = []
+    return long_data
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'TitleStyle',
-        parent=styles['Heading1'],
-        fontSize=18,
-        leading=22,
-        textColor=colors.HexColor('#1A365D'),
-        spaceAfter=15
+
+@st.cache_data
+def load_transport_data(file_source):
+    """Read trip and cost sheets and combine them into one dataset."""
+    trips = read_measure_sheet(file_source, "trips", "Trips")
+    costs = read_measure_sheet(file_source, "cost", "Cost")
+
+    combined = pd.merge(
+        trips,
+        costs,
+        on=["Provider", "Month"],
+        how="outer",
     )
-    section_style = ParagraphStyle(
-        'SectionStyle',
-        parent=styles['Heading2'],
-        fontSize=14,
-        leading=18,
-        textColor=colors.HexColor('#2C3E50'),
-        spaceAfter=10
+
+    combined["Trips"] = combined["Trips"].fillna(0)
+    combined["Cost"] = combined["Cost"].fillna(0)
+    combined["Trips"] = combined["Trips"].round().astype(int)
+
+    combined["Average cost per trip"] = 0.0
+    has_trips = combined["Trips"] > 0
+    combined.loc[has_trips, "Average cost per trip"] = (
+        combined.loc[has_trips, "Cost"]
+        / combined.loc[has_trips, "Trips"]
     )
-    normal_style = styles['Normal']
 
-    # Header components
-    story.append(Paragraph("Transport Usage & Costs Analysis Report", title_style))
-    story.append(Paragraph("Summary of client trips, monthly averages, and operational expenses generated via Web Upload.", normal_style))
-    story.append(Spacer(1, 15))
+    return combined.sort_values(["Month", "Provider"]).reset_index(drop=True)
 
-    # Trend Chart Section
-    story.append(Paragraph("1. Monthly Trip Trends Comparison", section_style))
-    story.append(Image(chart_path, width=500, height=250))
-    story.append(Spacer(1, 20))
 
-    # Summary Table Section
-    story.append(Paragraph("2. Consolidated Provider Summary Table", section_style))
+def find_default_workbook():
+    """Look for the workbook beside the app and in the current folder."""
+    possible_locations = [
+        Path(__file__).resolve().parent / DEFAULT_WORKBOOK,
+        Path.cwd() / DEFAULT_WORKBOOK,
+        Path.cwd() / "Transport_for_Clients.xlsx",
+    ]
 
-    df_formatted = df_summary_merged.round(2).copy()
-    table_data = [[Paragraph(f"<b>{col}</b>", styles['Normal']) for col in df_formatted.columns]]
+    for location in possible_locations:
+        if location.exists():
+            return location
 
-    for _, row in df_formatted.iterrows():
-        row_cells = []
-        for i, val in enumerate(row):
-            if i == 0:
-                row_cells.append(Paragraph(str(val), styles['Normal']))
-            elif 'Cost' in df_formatted.columns[i] or 'cost' in df_formatted.columns[i]:
-                row_cells.append(f"${val:,.2f}")
-            else:
-                row_cells.append(f"{val:,.2f}")
-        table_data.append(row_cells)
+    return None
 
-    summary_table = Table(table_data, colWidths=[180, 60, 60, 70, 70, 80])
-    summary_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F2F4F4')),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#1A365D')),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#D5D8DC')),
-    ]))
 
-    story.append(summary_table)
-    doc.build(story)
+def format_period(start_month, end_month):
+    """Create the period label used throughout the output."""
+    start_text = pd.Timestamp(start_month).strftime("%b %Y")
+    end_text = pd.Timestamp(end_month).strftime("%b %Y")
+    number_of_months = (
+        (pd.Timestamp(end_month).year - pd.Timestamp(start_month).year) * 12
+        + pd.Timestamp(end_month).month
+        - pd.Timestamp(start_month).month
+        + 1
+    )
 
-    # Clean up temp files
-    if os.path.exists(chart_path):
-        os.remove(chart_path)
+    if start_month == end_month:
+        return f"{start_text} (1 month)", number_of_months
 
-    buffer.seek(0)
-    return buffer, df_summary_merged, df_trips_long_clean
+    return f"{start_text} to {end_text} ({number_of_months} months)", number_of_months
 
-# --- 10. Streamlit File Upload and Run Interface ---
-uploaded_file = st.file_uploader("Choose your input Transport Excel file:", type=["xlsx"])
 
-if uploaded_file is not None:
-    st.success("File uploaded successfully! Clicking below will generate your customized PDF.")
+def build_provider_summary(filtered_data):
+    """Summarise trips, cost and unit cost by provider."""
+    summary = (
+        filtered_data.groupby("Provider", as_index=False)
+        .agg(
+            Trips=("Trips", "sum"),
+            Cost=("Cost", "sum"),
+        )
+    )
 
-    # Read file contents once
-    file_bytes = uploaded_file.read()
+    summary["Average cost per trip"] = 0.0
+    has_trips = summary["Trips"] > 0
+    summary.loc[has_trips, "Average cost per trip"] = (
+        summary.loc[has_trips, "Cost"]
+        / summary.loc[has_trips, "Trips"]
+    )
 
-    # Generate outputs
-    try:
-        pdf_buffer, df_summary, df_long = process_and_generate_pdf(file_bytes)
+    total_cost = summary["Cost"].sum()
+    summary["Cost share"] = 0.0
+    if total_cost > 0:
+        summary["Cost share"] = summary["Cost"] / total_cost
 
-        # Download Button
-        st.download_button(
-            label="📥 Download PDF Summary Report",
-            data=pdf_buffer,
-            file_name="Transport_Analysis_Summary.pdf",
-            mime="application/pdf"
+    return summary.sort_values("Cost", ascending=False).reset_index(drop=True)
+
+
+def create_download_data(filtered_data, period_label):
+    """Prepare a detailed CSV with the assessment period included."""
+    download_data = filtered_data.copy()
+    download_data.insert(0, "Assessment period", period_label)
+    download_data["Month"] = download_data["Month"].dt.strftime("%Y-%m")
+    return download_data.to_csv(index=False).encode("utf-8-sig")
+
+
+def main():
+    st.title("Transport for Clients Assessment")
+    st.caption(
+        "Review trip volume, expenditure and average cost across transport providers."
+    )
+
+    default_workbook = find_default_workbook()
+
+    with st.sidebar:
+        st.header("Data and filters")
+        uploaded_workbook = st.file_uploader(
+            "Upload transport workbook",
+            type=["xlsx"],
+            help="The workbook must contain sheets named 'trips' and 'cost'.",
         )
 
-        # Render Live Previews
-        st.subheader("Live App Data Preview")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Consolidated Averages:**")
-            st.dataframe(df_summary.style.format(precision=2))
-        with col2:
-            # Display the trend visualization inside the app state
-            st.markdown("**Monthly Client Trip Trends:**")
-            fig, ax = plt.subplots(figsize=(6, 3.5))
-            sns.lineplot(data=df_long, x='Month', y='Trips', hue='Provider', marker='o', linewidth=2, ax=ax)
-            plt.xticks(rotation=45, ha='right', fontsize=6)
-            plt.yticks(fontsize=6)
-            ax.legend(prop={'size': 5})
-            st.pyplot(fig)
+    file_source = uploaded_workbook or default_workbook
 
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
+    if file_source is None:
+        st.info(
+            f"Upload the workbook, or place '{DEFAULT_WORKBOOK}' beside app.py."
+        )
+        st.stop()
+
+    try:
+        transport_data = load_transport_data(file_source)
+    except Exception as error:
+        st.error(f"The workbook could not be read: {error}")
+        st.stop()
+
+    available_months = sorted(transport_data["Month"].dropna().unique())
+    available_providers = sorted(transport_data["Provider"].dropna().unique())
+
+    with st.sidebar:
+        selected_providers = st.multiselect(
+            "Providers",
+            options=available_providers,
+            default=available_providers,
+        )
+
+        start_month = st.selectbox(
+            "Assessment start month",
+            options=available_months,
+            index=0,
+            format_func=lambda month: pd.Timestamp(month).strftime("%b %Y"),
+        )
+
+        valid_end_months = [
+            month for month in available_months if month >= start_month
+        ]
+        end_month = st.selectbox(
+            "Assessment end month",
+            options=valid_end_months,
+            index=len(valid_end_months) - 1,
+            format_func=lambda month: pd.Timestamp(month).strftime("%b %Y"),
+        )
+
+    if not selected_providers:
+        st.warning("Select at least one provider to continue.")
+        st.stop()
+
+    filtered_data = transport_data[
+        transport_data["Provider"].isin(selected_providers)
+        & (transport_data["Month"] >= start_month)
+        & (transport_data["Month"] <= end_month)
+    ].copy()
+
+    period_label, number_of_months = format_period(start_month, end_month)
+    provider_summary = build_provider_summary(filtered_data)
+
+    total_trips = int(filtered_data["Trips"].sum())
+    total_cost = float(filtered_data["Cost"].sum())
+    average_cost = total_cost / total_trips if total_trips else 0
+    active_providers = int(
+        provider_summary.loc[
+            (provider_summary["Trips"] > 0) | (provider_summary["Cost"] > 0),
+            "Provider",
+        ].nunique()
+    )
+
+    st.subheader("Assessment period")
+    st.markdown(f"### {period_label}")
+    st.caption(
+        f"Selected providers: {len(selected_providers)} | "
+        f"Providers with recorded activity: {active_providers}"
+    )
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Total trips", f"{total_trips:,}")
+    metric_2.metric("Total cost", f"S${total_cost:,.2f}")
+    metric_3.metric("Average cost per trip", f"S${average_cost:,.2f}")
+    metric_4.metric("Average monthly cost", f"S${total_cost / number_of_months:,.2f}")
+
+    monthly_summary = (
+        filtered_data.groupby("Month", as_index=False)
+        .agg(Trips=("Trips", "sum"), Cost=("Cost", "sum"))
+        .sort_values("Month")
+    )
+
+    chart_1, chart_2 = st.columns(2)
+
+    with chart_1:
+        st.markdown(f"#### Monthly trips: {period_label}")
+        st.line_chart(
+            monthly_summary.set_index("Month")[["Trips"]],
+            use_container_width=True,
+        )
+
+    with chart_2:
+        st.markdown(f"#### Monthly cost: {period_label}")
+        st.line_chart(
+            monthly_summary.set_index("Month")[["Cost"]],
+            use_container_width=True,
+        )
+
+    st.subheader("Provider assessment")
+    display_summary = provider_summary.copy()
+    display_summary["Cost"] = display_summary["Cost"].map(
+        lambda value: f"S${value:,.2f}"
+    )
+    display_summary["Average cost per trip"] = display_summary[
+        "Average cost per trip"
+    ].map(lambda value: f"S${value:,.2f}")
+    display_summary["Cost share"] = display_summary["Cost share"].map(
+        lambda value: f"{value:.1%}"
+    )
+    st.dataframe(display_summary, use_container_width=True, hide_index=True)
+
+    provider_chart_data = provider_summary[provider_summary["Cost"] > 0]
+    if not provider_chart_data.empty:
+        st.markdown(f"#### Cost by provider: {period_label}")
+        st.bar_chart(
+            provider_chart_data.set_index("Provider")[["Cost"]],
+            use_container_width=True,
+        )
+
+    st.subheader("Assessment output")
+    st.write(
+        f"For **{period_label}**, the selected providers recorded "
+        f"**{total_trips:,} trips** at a total cost of "
+        f"**S${total_cost:,.2f}**, equivalent to an average of "
+        f"**S${average_cost:,.2f} per trip**."
+    )
+
+    csv_data = create_download_data(filtered_data, period_label)
+    file_period = (
+        f"{pd.Timestamp(start_month).strftime('%Y%m')}_"
+        f"{pd.Timestamp(end_month).strftime('%Y%m')}"
+    )
+    st.download_button(
+        "Download filtered assessment",
+        data=csv_data,
+        file_name=f"transport_assessment_{file_period}.csv",
+        mime="text/csv",
+    )
+
+    with st.expander("View monthly provider data"):
+        detailed_display = filtered_data.copy()
+        detailed_display["Month"] = detailed_display["Month"].dt.strftime(
+            "%b %Y"
+        )
+        st.dataframe(detailed_display, use_container_width=True, hide_index=True)
+
+
+if __name__ == "__main__":
+    main()
