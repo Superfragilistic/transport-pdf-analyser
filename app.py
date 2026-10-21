@@ -272,17 +272,19 @@ def main():
             use_container_width=True,
         )
 
-    provider_trip_trend = filtered_data.pivot_table(
-        index="Month",
-        columns="Provider",
-        values="Trips",
-        aggfunc="sum",
-        fill_value=0,
-    ).sort_index()
-
-    provider_trip_trend = provider_trip_trend.reindex(
-        columns=selected_providers,
-        fill_value=0,
+    provider_trip_trend = filtered_data[
+        ["Month", "Provider", "Trips"]
+    ].copy()
+    provider_trip_trend["Chart provider"] = provider_trip_trend[
+        "Provider"
+    ].replace(
+        {
+            "SLEC Transport Office (July - Aug 2026 Pilot)":
+                "SLEC Transport Office"
+        }
+    )
+    provider_trip_trend = provider_trip_trend.sort_values(
+        ["Month", "Chart provider"]
     )
 
     st.markdown(f"#### Monthly trips by provider: {period_label}")
@@ -291,6 +293,9 @@ def main():
     )
     st.line_chart(
         provider_trip_trend,
+        x="Month",
+        y="Trips",
+        color="Chart provider",
         use_container_width=True,
     )
 
