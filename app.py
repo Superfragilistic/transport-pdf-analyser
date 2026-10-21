@@ -319,8 +319,8 @@ def main():
     st.write(
         f"For **{period_label}**, the selected providers recorded "
         f"**{total_trips:,} trips** at a total cost of "
-        f"**S${total_cost:,.2f}**, equivalent to an average of "
-        f"**S${average_cost:,.2f} per trip**."
+        f"**S\\${total_cost:,.2f}**, equivalent to an average of "
+        f"**S\\${average_cost:,.2f} per trip**."
     )
 
     csv_data = create_download_data(filtered_data, period_label)
