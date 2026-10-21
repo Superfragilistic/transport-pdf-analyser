@@ -272,6 +272,28 @@ def main():
             use_container_width=True,
         )
 
+    provider_trip_trend = filtered_data.pivot_table(
+        index="Month",
+        columns="Provider",
+        values="Trips",
+        aggfunc="sum",
+        fill_value=0,
+    ).sort_index()
+
+    provider_trip_trend = provider_trip_trend.reindex(
+        columns=selected_providers,
+        fill_value=0,
+    )
+
+    st.markdown(f"#### Monthly trips by provider: {period_label}")
+    st.caption(
+        "Y-axis: number of trips | X-axis: month | Each line represents one provider"
+    )
+    st.line_chart(
+        provider_trip_trend,
+        use_container_width=True,
+    )
+
     st.subheader("Provider assessment")
     display_summary = provider_summary.copy()
     display_summary["Cost"] = display_summary["Cost"].map(
